@@ -1,0 +1,190 @@
+name: Build BitChord unsigned iOS IPA
+
+# Place this file in .github/workflows/ on the default branch.
+# Builds the Kotlin/Native framework with its supported Xcode, then compiles
+# the Swift iOS app with Xcode 27 (needed for `import NowPlaying`).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kotlin-shared:
+    name: Build Kotlin shared framework (Xcode 26.4)
+    runs-on: macos-26-intel
+    timeout-minutes: 180
+    steps:
+      - name: Check out BitChord
+        uses: actions/checkout@v4
+
+      - name: Use Xcode 26.4 for Kotlin 2.4.10
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo xcode-select --switch /Applications/Xcode_26.4.1.app/Contents/Developer
+          xcodebuild -version
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: gradle
+
+      - name: Pin Gradle to Kotlin-compatible version for this build
+        shell: bash
+        run: |
+          set -euo pipefail
+          # This repository pins Kotlin Multiplatform 2.4.10, whose tested
+          # Gradle upper bound is 9.5.0. The repository currently uses 9.7.1.
+          # Do not modify the user's committed wrapper; only patch this job.
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path('gradle/wrapper/gradle-wrapper.properties')
+          source = path.read_text()
+          updated, count = re.subn(
+              r'gradle-\d+(?:\.\d+){1,2}-bin\.zip',
+              'gradle-9.5.0-bin.zip',
+              source,
+          )
+          if count != 1:
+              raise SystemExit('Expected exactly one Gradle wrapper distribution URL')
+          path.write_text(updated)
+          PY
+          ./gradlew --version
+
+      - name: Build release Kotlin XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          CONFIG=release ./scripts/build-shared-framework.sh
+          test -d AppleApp/Frameworks/BitChordShared.xcframework
+
+      - name: Preserve XCFramework symlinks in tar archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          tar -czf BitChordShared-xcframework.tar.gz \
+            -C AppleApp/Frameworks BitChordShared.xcframework
+
+      - name: Transfer Kotlin framework to iOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitChord-Kotlin-framework
+          path: BitChordShared-xcframework.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  ios-ipa:
+    name: Build and package BitChord iPhone IPA (Xcode 27)
+    needs: kotlin-shared
+    runs-on: xcode-27
+    timeout-minutes: 300
+    env:
+      HOMEBREW_NO_AUTO_UPDATE: '1'
+      CMAKE_POLICY_VERSION_MINIMUM: '3.5'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - name: Check out BitChord
+        uses: actions/checkout@v4
+
+      - name: Verify Xcode 27 and build tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -version | head -1 | grep -Eq '^Xcode 27([.]|$)' || {
+            echo 'Error: this Swift source requires an Xcode 27 SDK.' >&2
+            exit 1
+          }
+          uname -m
+
+      - name: Install XcodeGen and CMake
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v xcodegen >/dev/null 2>&1; then
+            brew install xcodegen
+          fi
+          if ! command -v cmake >/dev/null 2>&1; then
+            brew install cmake
+          fi
+          xcodegen version
+          cmake --version
+
+      - name: Install Rust Apple targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Download Kotlin framework
+        uses: actions/download-artifact@v4
+        with:
+          name: BitChord-Kotlin-framework
+          path: .ci-kotlin-framework
+
+      - name: Unpack Kotlin XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p AppleApp/Frameworks
+          tar -xzf .ci-kotlin-framework/BitChordShared-xcframework.tar.gz \
+            -C AppleApp/Frameworks
+          test -d AppleApp/Frameworks/BitChordShared.xcframework
+
+      - name: Build Rust native audio XCFramework
+        shell: bash
+        run: |
+          set -euo pipefail
+          ./scripts/build-native-core.sh
+          test -d AppleApp/Frameworks/NativeCoreFFI.xcframework
+          test -f AppleApp/Generated/NativeCore.swift
+
+      - name: Generate iOS Xcode project
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodegen generate --spec AppleApp/project.yml
+          test -d AppleApp/BitChord.xcodeproj
+
+      - name: Compile unsigned arm64 iPhone app
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project AppleApp/BitChord.xcodeproj \
+            -scheme BitChord \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$RUNNER_TEMP/BitChordDerivedData" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            build
+
+      - name: Make unsigned IPA (Payload/BitChord.app)
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/BitChordDerivedData/Build/Products/Release-iphoneos/BitChord.app"
+          test -d "$APP_PATH"
+          test -f "$APP_PATH/Info.plist"
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Info.plist"
+          mkdir -p "$RUNNER_TEMP/BitChordIPA/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/BitChordIPA/Payload/BitChord.app"
+          (cd "$RUNNER_TEMP/BitChordIPA" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/BitChord-unsigned.ipa" Payload)
+          test -s "$GITHUB_WORKSPACE/BitChord-unsigned.ipa"
+          ls -lh BitChord-unsigned.ipa
+          unzip -l BitChord-unsigned.ipa | grep 'Payload/BitChord.app/Info.plist'
+
+      - name: Upload IPA to GitHub Actions artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitChord-unsigned-iOS-IPA
+          path: BitChord-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 7
