@@ -1,0 +1,68 @@
+name: Build BitChord IPA for LiveContainer
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    # BitChord's Apple project builds arm64 Apple targets.
+    runs-on: macos-15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Install Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Install Apple build tools
+        run: brew install xcodegen cmake
+
+      - name: Install Rust Apple targets
+        run: rustup target add aarch64-apple-darwin aarch64-apple-ios aarch64-apple-ios-sim
+
+      - name: Build shared Kotlin framework
+        run: CONFIG=release ./scripts/build-shared-framework.sh
+
+      - name: Build native audio framework
+        run: ./scripts/build-native-core.sh
+
+      - name: Generate Xcode project
+        run: xcodegen generate --spec AppleApp/project.yml
+
+      - name: Build unsigned iPhone app
+        run: >-
+          xcodebuild
+          -project AppleApp/BitChord.xcodeproj
+          -scheme BitChord
+          -configuration Release
+          -sdk iphoneos
+          -destination 'generic/platform=iOS'
+          -derivedDataPath "$RUNNER_TEMP/BitChordDerivedData"
+          CODE_SIGNING_ALLOWED=NO
+          CODE_SIGNING_REQUIRED=NO
+          build
+
+      - name: Package IPA for LiveContainer
+        shell: bash
+        run: |
+          set -euo pipefail
+          APP_PATH="$RUNNER_TEMP/BitChordDerivedData/Build/Products/Release-iphoneos/BitChord.app"
+          test -d "$APP_PATH"
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          ditto "$APP_PATH" "$RUNNER_TEMP/ipa/Payload/BitChord.app"
+          (cd "$RUNNER_TEMP/ipa" && /usr/bin/zip -qry "$GITHUB_WORKSPACE/BitChord-LiveContainer.ipa" Payload)
+          test -s "$GITHUB_WORKSPACE/BitChord-LiveContainer.ipa"
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BitChord-LiveContainer-IPA
+          path: BitChord-LiveContainer.ipa
+          if-no-files-found: error
+          retention-days: 7
