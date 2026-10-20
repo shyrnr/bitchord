@@ -180,9 +180,9 @@ struct SearchView: View {
                 #endif
                 .searchFocused($searchFieldFocused)
                 .onSubmit(of: .search) {
+                    searchFieldFocused = false
                     Task {
                         await performSearch()
-                        searchFieldFocused = false
                     }
                 }
                 // Upstream's `searchFocusTrigger`: re-tapping the tab that is
@@ -441,7 +441,7 @@ struct SearchView: View {
     /// See [resultsColumn]. Hidden for an empty search, a failed one, and while
     /// typing.
     private var showsFilters: Bool {
-        attempted && !searching && searchError == nil && !hits.isEmpty && !isEditing
+    attempted && !term.isEmpty && !isEditing
     }
 
     private var suggestionList: some View {
