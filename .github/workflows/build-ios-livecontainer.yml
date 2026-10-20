@@ -56,6 +56,11 @@ jobs:
           PY
           ./gradlew --version
 
+      - name: Create local.properties
+        shell: bash
+        run: touch local.properties
+
+
       - name: Build release Kotlin XCFramework
         shell: bash
         run: |
