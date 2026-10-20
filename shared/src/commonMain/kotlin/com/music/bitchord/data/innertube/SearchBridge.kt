@@ -31,7 +31,7 @@ object SearchBridge {
                 val response = Innertube.search(query, InnertubeParser.paramsFor(scope))
                 // The Videos tab is the one filter whose results are not music, so
                 // the promoted card is not read there at all.
-                val includeVideos = scope == SearchFilter.VIDEOS.name
+                val includeVideos = scope.equals(SearchFilter.VIDEOS.name, ignoreCase = true)
                 val hits = InnertubeParser.parseSearchPage(response, includeVideos)
                     .map { result -> hitOf(result) }
                 Innertube.checkSession(generation)
